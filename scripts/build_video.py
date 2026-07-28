@@ -149,8 +149,19 @@ def resolve_media_list(raw_list, tmp_dir):
 
 
 # ── TTS (edge-tts, free Microsoft voices) ─────────────────
+def normalize_rate(rate):
+    """edge-tts requires an explicit +/- sign, e.g. '+0%' not '0%'."""
+    rate = (rate or "+0%").strip()
+    if not re.match(r"^[+-]\d+%$", rate):
+        digits = re.sub(r"[^\d]", "", rate) or "0"
+        rate = f"+{digits}%"
+    return rate
+
+
 def synth_voice(text, voice, rate, out_path):
     import edge_tts
+
+    rate = normalize_rate(rate)
 
     async def _run():
         communicate = edge_tts.Communicate(text, voice=voice, rate=rate)
