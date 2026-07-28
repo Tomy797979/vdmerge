@@ -1,0 +1,101 @@
+name: Marketing Video (edge-tts → Dropbox)
+
+on:
+  workflow_dispatch:
+    inputs:
+      media_urls:
+        description: "Link ảnh/video, cách nhau bằng dấu phẩy hoặc xuống dòng (jpg/png/webp/mp4/mov...)"
+        required: true
+        type: string
+      script_text:
+        description: "Nội dung kịch bản (giọng đọc sẽ đọc chính xác đoạn này)"
+        required: true
+        type: string
+      voice:
+        description: "Giọng đọc Microsoft (edge-tts, miễn phí)"
+        required: true
+        type: choice
+        default: "en-US-AriaNeural"
+        options:
+          - en-US-AriaNeural
+          - en-US-JennyNeural
+          - en-US-GuyNeural
+          - en-US-AnaNeural
+          - en-GB-SoniaNeural
+          - en-GB-RyanNeural
+          - en-AU-NatashaNeural
+          - vi-VN-HoaiMyNeural
+          - vi-VN-NamMinhNeural
+      rate:
+        description: "Tốc độ đọc"
+        required: true
+        type: choice
+        default: "-8%"
+        options:
+          - "-20%"
+          - "-12%"
+          - "-8%"
+          - "-4%"
+          - "0%"
+          - "+8%"
+      resolution:
+        description: "Khung hình xuất"
+        required: true
+        type: choice
+        default: "tiktok"
+        options:
+          - tiktok
+          - youtube
+          - original
+      motion:
+        description: "Chuyển động ảnh (chỉ áp dụng cho ảnh, video giữ nguyên)"
+        required: true
+        type: choice
+        default: "kenburns"
+        options:
+          - kenburns
+          - static
+      output_name:
+        description: "Tên file output"
+        required: false
+        type: string
+        default: "marketing_video.mp4"
+      dropbox_folder:
+        description: "Thư mục Dropbox đích"
+        required: false
+        type: string
+        default: "/Marketing"
+
+jobs:
+  build-and-upload:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install ffmpeg
+        run: sudo apt-get update && sudo apt-get install -y ffmpeg
+
+      - name: Install Python dependencies
+        run: pip install -r requirements.txt
+
+      - name: Build video and upload to Dropbox
+        env:
+          MEDIA_URLS: ${{ inputs.media_urls }}
+          SCRIPT_TEXT: ${{ inputs.script_text }}
+          VOICE: ${{ inputs.voice }}
+          RATE: ${{ inputs.rate }}
+          RESOLUTION: ${{ inputs.resolution }}
+          MOTION: ${{ inputs.motion }}
+          OUTPUT_NAME: ${{ inputs.output_name }}
+          DROPBOX_FOLDER: ${{ inputs.dropbox_folder }}
+          DROPBOX_APP_KEY: ${{ secrets.DROPBOX_APP_KEY }}
+          DROPBOX_APP_SECRET: ${{ secrets.DROPBOX_APP_SECRET }}
+          DROPBOX_REFRESH_TOKEN: ${{ secrets.DROPBOX_REFRESH_TOKEN }}
+        run: python scripts/build_video.py
