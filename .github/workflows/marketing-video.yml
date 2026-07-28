@@ -12,27 +12,29 @@ on:
         required: true
         type: string
       voice:
-        description: "Giọng đọc Microsoft (edge-tts, miễn phí)"
+        description: "Giọng đọc Microsoft — mặc định Jenny (ấm, phù hợp nội dung cầu nguyện/POH)"
         required: true
         type: choice
-        default: "en-US-AriaNeural"
+        default: "en-US-JennyNeural"
         options:
-          - en-US-AriaNeural
           - en-US-JennyNeural
-          - en-US-GuyNeural
-          - en-US-AnaNeural
           - en-GB-SoniaNeural
+          - en-US-AriaNeural
+          - en-US-AnaNeural
+          - en-US-GuyNeural
           - en-GB-RyanNeural
           - en-AU-NatashaNeural
           - vi-VN-HoaiMyNeural
           - vi-VN-NamMinhNeural
       rate:
-        description: "Tốc độ đọc"
+        description: "Tốc độ đọc — mặc định -15% (chậm, tĩnh lặng, đúng nhịp cầu nguyện)"
         required: true
         type: choice
-        default: "-8%"
+        default: "-15%"
         options:
+          - "-25%"
           - "-20%"
+          - "-15%"
           - "-12%"
           - "-8%"
           - "-4%"
@@ -55,6 +57,53 @@ on:
         options:
           - kenburns
           - static
+      caption_enable:
+        description: "Tự động tạo caption (burn vào video)?"
+        required: true
+        type: choice
+        default: "true"
+        options:
+          - "true"
+          - "false"
+      caption_style:
+        description: "Style caption"
+        required: true
+        type: choice
+        default: "poh_gold"
+        options:
+          - poh_gold
+          - poh_box_plum
+          - classic_white
+      caption_position:
+        description: "Vị trí caption"
+        required: true
+        type: choice
+        default: "bottom"
+        options:
+          - bottom
+          - center
+          - top
+      caption_words:
+        description: "Số từ / 1 dòng caption"
+        required: true
+        type: choice
+        default: "4"
+        options:
+          - "3"
+          - "4"
+          - "5"
+          - "6"
+      caption_font_size:
+        description: "Cỡ chữ caption (px, theo PlayRes của video xuất ra)"
+        required: true
+        type: choice
+        default: "40"
+        options:
+          - "28"
+          - "34"
+          - "40"
+          - "48"
+          - "56"
       output_name:
         description: "Tên file output"
         required: false
@@ -95,6 +144,11 @@ jobs:
           MOTION: ${{ inputs.motion }}
           OUTPUT_NAME: ${{ inputs.output_name }}
           DROPBOX_FOLDER: ${{ inputs.dropbox_folder }}
+          CAPTION_ENABLE: ${{ inputs.caption_enable }}
+          CAPTION_STYLE: ${{ inputs.caption_style }}
+          CAPTION_POSITION: ${{ inputs.caption_position }}
+          CAPTION_WORDS: ${{ inputs.caption_words }}
+          CAPTION_FONT_SIZE: ${{ inputs.caption_font_size }}
           DROPBOX_APP_KEY: ${{ secrets.DROPBOX_APP_KEY }}
           DROPBOX_APP_SECRET: ${{ secrets.DROPBOX_APP_SECRET }}
           DROPBOX_REFRESH_TOKEN: ${{ secrets.DROPBOX_REFRESH_TOKEN }}
