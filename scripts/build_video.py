@@ -7,15 +7,25 @@ Voice : Microsoft edge-tts (free, no API key needed)
 Output: single .mp4, auto-uploaded to Dropbox
 
 Env vars expected (set by the workflow from `workflow_dispatch` inputs / secrets):
-    MEDIA_URLS        comma or newline separated list of image/video URLs (or local paths under ./input_media)
-    SCRIPT_TEXT        voiceover script text
-    VOICE              edge-tts voice name, e.g. en-US-AriaNeural
-    RATE               edge-tts rate, e.g. -8%
-    RESOLUTION         tiktok | youtube | original
-    MOTION             kenburns | static   (only applies to images)
-    OUTPUT_NAME        e.g. marketing_video.mp4
-    DROPBOX_FOLDER     e.g. /Marketing
+    MEDIA_URLS          comma or newline separated list of image/video URLs (or local paths under ./input_media)
+    SCRIPT_TEXT          voiceover script text
+    VOICE                edge-tts voice name, e.g. en-US-JennyNeural
+    RATE                 edge-tts rate, e.g. -15%
+    RESOLUTION           tiktok | youtube | original
+    MOTION               kenburns | static   (only applies to images)
+    OUTPUT_NAME          e.g. marketing_video.mp4
+    DROPBOX_FOLDER       e.g. /Marketing
+    CAPTION_ENABLE       "true" | "false"
+    CAPTION_STYLE        poh_gold | poh_box_plum | classic_white
+    CAPTION_POSITION     bottom | center | top
+    CAPTION_WORDS        words grouped per caption card, e.g. "4"
+    CAPTION_FONT_SIZE    e.g. "40"
     DROPBOX_APP_KEY, DROPBOX_APP_SECRET, DROPBOX_REFRESH_TOKEN   (repo secrets)
+
+Caption timing is taken directly from edge-tts's own word-boundary events
+(the exact timestamps Microsoft's TTS engine used to speak each word) —
+no separate speech-to-text pass is needed, so captions are frame-accurate
+and free.
 """
 
 import os
@@ -35,6 +45,29 @@ VIDEO_EXTS = {".mp4", ".mov", ".avi", ".mkv", ".webm"}
 FPS = 30
 DBX_API = "https://api.dropboxapi.com/2"
 DBX_CONTENT = "https://content.dropboxapi.com/2"
+
+# ASS colours are &HAABBGGRR (alpha,blue,green,red — hex, alpha 00=opaque).
+# Built from POH brand hex: ivory #FBF8F2, plum #6E4A5E, gold #B08D43.
+CAPTION_PRESETS = {
+    "poh_gold": {
+        # Ivory text, plum outline — matches POH's editorial palette, no box.
+        "primary_color": "&H00F2F8FB", "outline_color": "&H005E4A6E",
+        "back_color": "&H00000000", "outline_width": 2, "shadow": 1,
+        "bold": 0, "border_style": 1,
+    },
+    "poh_box_plum": {
+        # Ivory text on a soft translucent plum box — reads well on busy photos.
+        "primary_color": "&H00F2F8FB", "outline_color": "&H00000000",
+        "back_color": "&H905E4A6E", "outline_width": 0, "shadow": 0,
+        "bold": 1, "border_style": 3,
+    },
+    "classic_white": {
+        # Safe fallback: white text, black outline, no box.
+        "primary_color": "&H00FFFFFF", "outline_color": "&H00000000",
+        "back_color": "&H00000000", "outline_width": 2, "shadow": 1,
+        "bold": 0, "border_style": 1,
+    },
+}
 
 
 def log(msg):
@@ -153,23 +186,48 @@ def normalize_rate(rate):
     """edge-tts requires an explicit +/- sign, e.g. '+0%' not '0%'."""
     rate = (rate or "+0%").strip()
     if not re.match(r"^[+-]\d+%$", rate):
+        sign = "-" if rate.strip().startswith("-") else "+"
         digits = re.sub(r"[^\d]", "", rate) or "0"
-        rate = f"+{digits}%"
+        rate = f"{sign}{digits}%"
     return rate
 
 
-def synth_voice(text, voice, rate, out_path):
+def synth_voice_with_captions(text, voice, rate, audio_out, srt_out):
+    """
+    Generate the voiceover AND a word-level SRT from edge-tts's own
+    WordBoundary events (the exact timing it used to speak the text) —
+    no separate speech-to-text pass needed, so captions are frame-accurate.
+    """
     import edge_tts
 
     rate = normalize_rate(rate)
 
     async def _run():
         communicate = edge_tts.Communicate(text, voice=voice, rate=rate)
-        await communicate.save(out_path)
+        submaker = edge_tts.SubMaker()
+        with open(audio_out, "wb") as f:
+            async for chunk in communicate.stream():
+                if chunk["type"] == "audio":
+                    f.write(chunk["data"])
+                elif chunk["type"] == "WordBoundary":
+                    # Support both the modern (feed) and older (create_sub) SubMaker APIs.
+                    if hasattr(submaker, "feed"):
+                        submaker.feed(chunk)
+                    else:
+                        submaker.create_sub(
+                            (chunk["offset"], chunk["duration"]), chunk["text"])
+        if hasattr(submaker, "get_srt"):
+            srt_text = submaker.get_srt()
+        else:
+            srt_text = submaker.generate_subs()
+        with open(srt_out, "w", encoding="utf-8") as f:
+            f.write(srt_text)
 
     asyncio.run(_run())
-    if not os.path.exists(out_path) or os.path.getsize(out_path) < 1024:
+    if not os.path.exists(audio_out) or os.path.getsize(audio_out) < 1024:
         fail("edge-tts did not produce a usable audio file (check network egress / voice name).")
+    if not os.path.exists(srt_out) or os.path.getsize(srt_out) < 10:
+        log("WARNING: no word-boundary captions were captured — captions will be skipped.")
 
 
 # ── resolution / clip building ─────────────────────────────
@@ -262,6 +320,111 @@ def build_final_video(media_items, voice_path, resolution, motion, output_path, 
     if not ok:
         fail(f"Final mux failed: {err}")
     log(f"Final video ready: {output_path}")
+    return w, h
+
+
+# ── Captions: word-SRT → grouped SRT → ASS → burn-in ──────
+def _srt_ts_to_seconds(ts):
+    h, m, rest = ts.split(":")
+    s, ms = rest.split(",")
+    return int(h) * 3600 + int(m) * 60 + int(s) + int(ms) / 1000
+
+
+def _seconds_to_srt_ts(t):
+    t = max(0.0, t)
+    h = int(t // 3600)
+    m = int((t % 3600) // 60)
+    s = int(t % 60)
+    ms = int(round((t - int(t)) * 1000))
+    return f"{h:02d}:{m:02d}:{s:02d},{ms:03d}"
+
+
+def parse_srt(path):
+    raw = open(path, encoding="utf-8", errors="ignore").read().strip()
+    entries = []
+    for block in re.split(r"\n\s*\n", raw):
+        lines = [ln for ln in block.splitlines() if ln.strip()]
+        if len(lines) < 2:
+            continue
+        m = re.match(r"(\d{2}:\d{2}:\d{2},\d{3})\s*-->\s*(\d{2}:\d{2}:\d{2},\d{3})", lines[1])
+        if not m:
+            continue
+        text = " ".join(lines[2:]).strip()
+        if text:
+            entries.append((m.group(1), m.group(2), text))
+    return entries
+
+
+def merge_srt_words(entries, words_per_caption):
+    words_per_caption = max(1, int(words_per_caption))
+    merged = []
+    for i in range(0, len(entries), words_per_caption):
+        group = entries[i:i + words_per_caption]
+        start = group[0][0]
+        end = group[-1][1]
+        text = " ".join(g[2] for g in group)
+        merged.append((start, end, text))
+    return merged
+
+
+def write_srt(entries, path):
+    lines = []
+    for idx, (start, end, text) in enumerate(entries, 1):
+        lines += [str(idx), f"{start} --> {end}", text, ""]
+    with open(path, "w", encoding="utf-8") as f:
+        f.write("\n".join(lines))
+
+
+def build_caption_srt(raw_srt_path, words_per_caption, grouped_srt_path):
+    entries = parse_srt(raw_srt_path)
+    if not entries:
+        return False
+    merged = merge_srt_words(entries, words_per_caption)
+    write_srt(merged, grouped_srt_path)
+    return True
+
+
+def srt_to_ass(srt_path, ass_path, style, position, font_size, width, height):
+    alignment_map = {"bottom": 2, "center": 5, "top": 8}
+    margin_v = max(20, int(height * 0.06))
+    alignment = alignment_map.get(position, 2)
+    if position == "center":
+        margin_v = 0
+
+    header = f"""[Script Info]
+ScriptType: v4.00+
+PlayResX: {width}
+PlayResY: {height}
+WrapStyle: 0
+[V4+ Styles]
+Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
+Style: Default,Arial,{font_size},{style['primary_color']},&H000000FF,{style['outline_color']},{style['back_color']},{style['bold']},0,0,0,100,100,0,0,{style['border_style']},{style['outline_width']},{style['shadow']},{alignment},40,40,{margin_v},1
+[Events]
+Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
+"""
+
+    def srt_ts_to_ass(ts):
+        secs = _srt_ts_to_seconds(ts)
+        h = int(secs // 3600)
+        m = int((secs % 3600) // 60)
+        s = secs % 60
+        return f"{h}:{m:02d}:{s:05.2f}"
+
+    events = []
+    for start, end, text in parse_srt(srt_path):
+        text = re.sub(r"<[^>]+>", "", text).replace("\n", "\\N")
+        events.append(f"Dialogue: 0,{srt_ts_to_ass(start)},{srt_ts_to_ass(end)},Default,,0,0,0,,{text}")
+
+    with open(ass_path, "w", encoding="utf-8") as f:
+        f.write(header + "\n".join(events))
+
+
+def burn_captions(video_path, ass_path, output_path):
+    ass_esc = ass_path.replace("\\", "/")
+    cmd = ["ffmpeg", "-y", "-i", video_path, "-vf", f"ass={ass_esc}",
+           "-c:v", "libx264", "-preset", "fast", "-crf", "22",
+           "-c:a", "copy", "-movflags", "+faststart", output_path]
+    return run_ff(cmd)
 
 
 # ── Dropbox upload (refresh-token OAuth) ──────────────────
@@ -362,12 +525,18 @@ def dbx_upload(token, file_path, folder, filename):
 def main():
     media_raw = os.environ.get("MEDIA_URLS", "")
     script_text = os.environ.get("SCRIPT_TEXT", "").strip()
-    voice = os.environ.get("VOICE", "en-US-AriaNeural")
-    rate = os.environ.get("RATE", "-8%")
+    voice = os.environ.get("VOICE", "en-US-JennyNeural")
+    rate = os.environ.get("RATE", "-15%")
     resolution = os.environ.get("RESOLUTION", "tiktok")
     motion = os.environ.get("MOTION", "kenburns")
     output_name = os.environ.get("OUTPUT_NAME", "marketing_video.mp4")
     dropbox_folder = os.environ.get("DROPBOX_FOLDER", "/Marketing")
+
+    caption_enable = os.environ.get("CAPTION_ENABLE", "true").strip().lower() == "true"
+    caption_style_key = os.environ.get("CAPTION_STYLE", "poh_gold")
+    caption_position = os.environ.get("CAPTION_POSITION", "bottom")
+    caption_words = os.environ.get("CAPTION_WORDS", "4")
+    caption_font_size = os.environ.get("CAPTION_FONT_SIZE", "40")
 
     app_key = os.environ.get("DROPBOX_APP_KEY", "")
     app_secret = os.environ.get("DROPBOX_APP_SECRET", "")
@@ -388,18 +557,38 @@ def main():
 
         log(f"Generating voiceover with edge-tts voice={voice} rate={rate}...")
         voice_path = os.path.join(tmp_dir, "voice_raw.mp3")
-        synth_voice(script_text, voice, rate, voice_path)
+        raw_srt_path = os.path.join(tmp_dir, "words_raw.srt")
+        synth_voice_with_captions(script_text, voice, rate, voice_path, raw_srt_path)
         if not has_audio_stream(voice_path):
             fail("Generated voice file has no audio stream.")
 
         output_path = os.path.join(tmp_dir, output_name)
-        build_final_video(media_items, voice_path, resolution, motion, output_path, tmp_dir)
+        out_w, out_h = build_final_video(media_items, voice_path, resolution, motion, output_path, tmp_dir)
+
+        upload_path = output_path
+        if caption_enable:
+            log(f"Building captions (style={caption_style_key}, {caption_words} words/card)...")
+            grouped_srt = os.path.join(tmp_dir, "captions.srt")
+            if build_caption_srt(raw_srt_path, caption_words, grouped_srt):
+                style = CAPTION_PRESETS.get(caption_style_key, CAPTION_PRESETS["poh_gold"])
+                ass_path = os.path.join(tmp_dir, "captions.ass")
+                srt_to_ass(grouped_srt, ass_path, style, caption_position,
+                          caption_font_size, out_w, out_h)
+                captioned_path = os.path.join(tmp_dir, f"captioned_{output_name}")
+                ok, err = burn_captions(output_path, ass_path, captioned_path)
+                if ok:
+                    upload_path = captioned_path
+                    log("Captions burned in successfully.")
+                else:
+                    log(f"WARNING: burning captions failed, uploading without captions: {err}")
+            else:
+                log("WARNING: no caption timing available, uploading without captions.")
 
         log("Authenticating with Dropbox...")
         token = dbx_get_access_token(app_key, app_secret, refresh_token)
 
         log(f"Uploading to Dropbox: {dropbox_folder}")
-        final_name, share_url = dbx_upload(token, output_path, dropbox_folder, output_name)
+        final_name, share_url = dbx_upload(token, upload_path, dropbox_folder, output_name)
 
         log(f"Done. Uploaded as '{final_name}'.")
         if share_url:
